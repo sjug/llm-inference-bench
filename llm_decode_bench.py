@@ -9755,7 +9755,8 @@ async def run_one_cell(
             measurement_tokens = shared_token_count[0] - measurement_tokens_start
             usage_elapsed_end = (
                 shared_usage_last_time[0]
-                if measurement_usage_tokens > 0 and shared_usage_last_time[0] > measurement_start
+                if measurement_usage_tokens > 0 and measurement_start is not None
+                and shared_usage_last_time[0] > measurement_start
                 else now
             )
             token_elapsed_end = (
@@ -9879,12 +9880,14 @@ async def run_one_cell(
     aggregate_source = ""
     usage_measure_end = (
         shared_usage_last_time[0]
-        if measurement_usage_tokens > 0 and shared_usage_last_time[0] > measurement_start
+        if measurement_usage_tokens > 0 and measurement_start is not None
+        and shared_usage_last_time[0] > measurement_start
         else measurement_end
     )
     token_measure_end = (
         shared_token_last_time[0]
-        if measurement_tokens > 0 and shared_token_last_time[0] > measurement_start
+        if measurement_tokens > 0 and measurement_start is not None
+        and shared_token_last_time[0] > measurement_start
         else measurement_end
     )
     usage_measure_duration = (
@@ -12907,13 +12910,18 @@ async def run_benchmark(args):
     limits = httpx.Limits(max_connections=max_conc + 20, max_keepalive_connections=max_conc + 10)
 
     async def measure_ttft(client, messages):
-        """Send one streaming request with max_tokens=1, return (TTFT, prompt_tokens).
+        """Send one streaming request with a tiny max_tokens budget, return (TTFT, prompt_tokens).
         prompt_tokens is None if not available from server."""
+        # max_tokens must exceed 1: reasoning parsers (e.g. poolside_v1) consume
+        # the think-open tag as token 1 and emit no visible delta for it, so a
+        # 1-token budget ends the stream before any content/reasoning arrives.
+        # TTFT is still recorded at the first visible delta (<=1 decode step of
+        # skew, noise against multi-second prefills).
         payload = {
             "model": args.model,
             "messages": messages,
             "stream": True,
-            "max_tokens": 1,
+            "max_tokens": 8,
             "stream_options": {"include_usage": True},
         }
         t0 = time.monotonic()
