@@ -4005,6 +4005,20 @@ BENCH_DATASETS = {
 }
 
 
+
+# Optional chat_template_kwargs injected into every /v1/chat/completions
+# payload (e.g. '{"reasoning_effort": "low"}' to pin the DeepSeek-V4-0731
+# reasoning contract for cross-image comparability). Set from
+# --chat-template-kwargs in main(); None means the server default applies.
+CHAT_TEMPLATE_KWARGS: "dict | None" = None
+
+
+def apply_chat_template_kwargs(payload: dict) -> dict:
+    if CHAT_TEMPLATE_KWARGS:
+        payload["chat_template_kwargs"] = CHAT_TEMPLATE_KWARGS
+    return payload
+
+
 def _build_gpqa_diamond_jsonl(csv_bytes: bytes) -> bytes:
     """Deterministic canonical JSONL from the official gpqa_diamond.csv."""
     rows = list(csv.DictReader(io.StringIO(csv_bytes.decode("utf-8"))))
@@ -8915,6 +8929,7 @@ async def run_one_cell(
         payload["ignore_eos"] = True
     if temperature is not None:
         payload["temperature"] = temperature
+    apply_chat_template_kwargs(payload)
 
     url = f"{base_url}/v1/chat/completions"
     cancel_event = asyncio.Event()
@@ -8968,6 +8983,7 @@ async def run_one_cell(
         }
         if ignore_eos:
             scout_payload["ignore_eos"] = True
+        apply_chat_template_kwargs(scout_payload)
         should_record_prefill = (
             context_tokens in state.prefill_contexts
             and context_tokens not in state.prefill_results
@@ -11901,6 +11917,7 @@ async def run_completion_stats_benchmark(args) -> dict:
             payload["temperature"] = args.completion_stats_temperature
         if args.completion_stats_top_p is not None:
             payload["top_p"] = args.completion_stats_top_p
+        apply_chat_template_kwargs(payload)
         request_overrides = (profile or {}).get("request_overrides") or {}
         if request_overrides:
             payload.update(json.loads(json.dumps(request_overrides)))
@@ -12142,6 +12159,7 @@ async def run_completion_stats_benchmark(args) -> dict:
                 "prompt_source": prompt_source,
                 "prompt_chars": len(prompt),
                 "timestamp": datetime.now().isoformat(),
+                "chat_template_kwargs": CHAT_TEMPLATE_KWARGS,
                 "max_tokens": args.max_tokens if args.max_tokens > 0 else None,
                 "token_limit_field": token_limit_field,
                 "max_tokens_omitted": args.max_tokens <= 0,
@@ -12739,10 +12757,10 @@ async def run_benchmark(args):
                         target_chars = int(cal_ctx * calibrated_cpt)
                         cal_text = (prefix + base_text)[:target_chars]
                         msgs = build_messages(cal_ctx, cal_text)
-                        payload = {
+                        payload = apply_chat_template_kwargs({
                             "model": args.model, "messages": msgs,
                             "stream": False, "max_tokens": 1,
-                        }
+                        })
                         try:
                             resp = await cal_client.post(
                                 f"{base_url}/v1/chat/completions",
@@ -12917,13 +12935,13 @@ async def run_benchmark(args):
         # 1-token budget ends the stream before any content/reasoning arrives.
         # TTFT is still recorded at the first visible delta (<=1 decode step of
         # skew, noise against multi-second prefills).
-        payload = {
+        payload = apply_chat_template_kwargs({
             "model": args.model,
             "messages": messages,
             "stream": True,
             "max_tokens": 8,
             "stream_options": {"include_usage": True},
-        }
+        })
         t0 = time.monotonic()
         ttft = None
         prompt_tokens = None
@@ -14261,6 +14279,7 @@ def save_results(results: list, args, filepath: str, prefill_results: dict = Non
             "model": args.model,
             "server": args.host if args.host.startswith("http") else f"{args.host}:{args.port or 5000}",
             "timestamp": datetime.now().isoformat(),
+            "chat_template_kwargs": CHAT_TEMPLATE_KWARGS,
             "decode_mode": "request-count" if getattr(args, "request_count", 0) > 0 else "duration",
             "primary_decode_layer": (
                 "burst_e2e_decode"
@@ -14689,6 +14708,11 @@ def parse_args():
     parser.add_argument(
         "--api-key", default="",
         help="API key for authenticated endpoints (sent as Authorization: Bearer header)"
+    )
+    parser.add_argument(
+        "--chat-template-kwargs", default="",
+        help="JSON object injected as chat_template_kwargs into every chat request, "
+             "e.g. '{\"reasoning_effort\": \"low\"}'. Empty means server default."
     )
     parser.add_argument(
         "--prompt", default="",
@@ -15249,6 +15273,12 @@ def main():
     console = Console()
     check_for_update(console)
     args = parse_args()
+    if getattr(args, "chat_template_kwargs", ""):
+        global CHAT_TEMPLATE_KWARGS
+        parsed_ctk = json.loads(args.chat_template_kwargs)
+        if not isinstance(parsed_ctk, dict):
+            raise SystemExit("--chat-template-kwargs must be a JSON object")
+        CHAT_TEMPLATE_KWARGS = parsed_ctk
     if args.compare_candidate:
         try:
             with open(args.compare_baseline, "r", encoding="utf-8") as fh:
@@ -15271,6 +15301,7 @@ def main():
                     "version": VERSION,
                     "mode": "paired_comparison",
                     "timestamp": datetime.now().isoformat(),
+                    "chat_template_kwargs": CHAT_TEMPLATE_KWARGS,
                     "baseline_path": args.compare_baseline,
                     "candidate_path": args.compare_candidate,
                 },
@@ -15303,6 +15334,7 @@ def main():
                 "version": VERSION,
                 "mode": "_".join(modes) + "_only",
                 "timestamp": datetime.now().isoformat(),
+                "chat_template_kwargs": CHAT_TEMPLATE_KWARGS,
             },
             "nvidia_p2p_override": args.nvidia_p2p_override,
             "p2pmark": args.p2pmark_result,
